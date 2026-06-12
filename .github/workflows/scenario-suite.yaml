@@ -1,0 +1,140 @@
+name: Scenario Suite
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_timeout_minutes:
+        description: Minutes to wait for build orchestration
+        type: string
+        default: "10"
+      dispatch_timeout_minutes:
+        description: Minutes to wait for dispatch confirmation
+        type: string
+        default: "5"
+  schedule:
+    - cron: '30 6 * * *'
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: scenario-suite
+  cancel-in-progress: false
+
+env:
+  MANIFEST_FILE: .github/manifest.yaml
+  MANIFEST_KEY: ci
+  TAG_PREFIX: v
+  BOT_NAME: github-actions[bot]
+  BOT_EMAIL: github-actions[bot]@users.noreply.github.com
+
+jobs:
+  scenario-suite:
+    name: Scenario Suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.CASCADE_STATE_TOKEN }}
+
+      - name: Setup cascade CLI
+        uses: stablekernel/cascade/.github/actions/setup-cli@v0.1.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          version: v0.1.0
+
+      - name: Configure git identity
+        run: |
+          git config user.name "$BOT_NAME"
+          git config user.email "$BOT_EMAIL"
+
+      - name: Commit trigger change
+        id: trigger
+        run: |
+          date -u +%Y-%m-%dT%H:%M:%SZ > src/build-trigger.txt
+          git add src/build-trigger.txt
+          git commit -m "chore: trigger build run for scenario suite"
+          git push
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for orchestrate run to start
+        id: wait-start
+        env:
+          GH_TOKEN: ${{ secrets.CASCADE_STATE_TOKEN }}
+          TRIGGER_SHA: ${{ steps.trigger.outputs.sha }}
+        run: |
+          MAX_ATTEMPTS=10
+          INTERVAL=30
+          for i in $(seq 1 $MAX_ATTEMPTS); do
+            echo "Attempt $i of $MAX_ATTEMPTS - checking for orchestrate run..."
+            RUN_ID=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/orchestrate.yaml/runs?head_sha=${TRIGGER_SHA}&per_page=1" --jq '.workflow_runs[0].id // empty')
+            if [ -n "$RUN_ID" ]; then
+              echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
+              echo "Orchestrate run started: $RUN_ID"
+              break
+            fi
+            if [ "$i" -eq "$MAX_ATTEMPTS" ]; then
+              echo "::error::Timed out waiting for orchestrate run to start after $((MAX_ATTEMPTS * INTERVAL))s"
+              exit 1
+            fi
+            sleep $INTERVAL
+          done
+
+      - name: Wait for orchestrate run to complete
+        id: wait-complete
+        env:
+          GH_TOKEN: ${{ secrets.CASCADE_STATE_TOKEN }}
+          RUN_ID: ${{ steps.wait-start.outputs.run_id }}
+        run: |
+          MAX_ATTEMPTS=20
+          INTERVAL=30
+          for i in $(seq 1 $MAX_ATTEMPTS); do
+            echo "Attempt $i of $MAX_ATTEMPTS - checking run $RUN_ID status..."
+            STATUS=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID" --jq '.status')
+            CONCLUSION=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID" --jq '.conclusion // empty')
+            echo "Status: $STATUS, Conclusion: $CONCLUSION"
+            if [ "$STATUS" = "completed" ]; then
+              if [ "$CONCLUSION" = "success" ]; then
+                echo "Orchestrate run completed successfully"
+                break
+              else
+                echo "::error::Orchestrate run completed with conclusion: $CONCLUSION"
+                exit 1
+              fi
+            fi
+            if [ "$i" -eq "$MAX_ATTEMPTS" ]; then
+              echo "::error::Timed out waiting for orchestrate run to complete after $((MAX_ATTEMPTS * INTERVAL))s"
+              exit 1
+            fi
+            sleep $INTERVAL
+          done
+
+      - name: Assert dispatch to primary
+        env:
+          GH_TOKEN: ${{ secrets.CASCADE_STATE_TOKEN }}
+        run: |
+          echo "Checking that External Update was dispatched to primary..."
+          RECENT_RUNS=$(gh api "repos/stablekernel/cascade-example-primary/actions/workflows/external-update.yaml/runs?per_page=5" --jq '.workflow_runs[].created_at' 2>/dev/null || echo "")
+          if [ -z "$RECENT_RUNS" ]; then
+            echo "::error::No external-update runs found on primary after dispatch"
+            exit 1
+          fi
+          echo "External Update dispatched successfully. Recent runs:"
+          echo "$RECENT_RUNS"
+
+      - name: Write summary
+        if: always()
+        run: |
+          {
+            echo "## Scenario Suite Results"
+            echo ""
+            echo "| Check | Result |"
+            echo "|-------|--------|"
+            echo "| Build triggered | ${{ steps.trigger.outcome }} |"
+            echo "| Orchestrate started | ${{ steps.wait-start.outcome }} |"
+            echo "| Orchestrate completed | ${{ steps.wait-complete.outcome }} |"
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,19 @@
+ci:
+  config:
+    schema_version: 1
+    trunk_branch: main
+    cli_version: v0.1.0
+    state_token: ${{ secrets.CASCADE_STATE_TOKEN }}
+    manifest_file: .github/manifest.yaml
+    manifest_key: ci
+    triggers:
+      - src/**
+    builds:
+      - name: shared
+        workflow: .github/workflows/build-shared.yaml
+        triggers: []
+    notify:
+      repo: stablekernel/cascade-example-primary
+      workflow: external-update.yaml
+      token: CASCADE_STATE_TOKEN
+  state: {}

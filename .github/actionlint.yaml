@@ -1,0 +1,10 @@
+self-hosted-runner:
+  labels: []
+config-variables: null
+paths:
+  .github/workflows/orchestrate.yaml:
+    ignore:
+      - 'SC2129'
+  .github/workflows/promote.yaml:
+    ignore:
+      - 'SC2129'
