@@ -17,6 +17,7 @@ on:
 permissions:
   contents: write
   actions: write
+  pull-requests: write
 
 concurrency:
   group: scenario-suite
@@ -52,48 +53,49 @@ jobs:
           git config user.name "$BOT_NAME"
           git config user.email "$BOT_EMAIL"
 
-      - name: Commit trigger change
-        id: trigger
+      - name: Seed build via PR
+        id: seed
+        env:
+          GH_TOKEN: ${{ secrets.CASCADE_STATE_TEST_TOKEN }}
         run: |
-          date -u +%Y-%m-%dT%H:%M:%SZ > src/build-trigger.txt
+          set -euo pipefail
+          git config user.name "scenario-suite"
+          git config user.email "scenario-suite@users.noreply.github.com"
+          BRANCH="scenario/src-$(date +%s)-$RANDOM"
+          git fetch origin main --quiet
+          git checkout -B "$BRANCH" origin/main
+          mkdir -p src
+          echo "scenario change $(date -u +%FT%TWZ)" >> src/build-trigger.txt
           git add src/build-trigger.txt
-          git commit -m "chore: trigger build run for scenario suite"
-          git push
-          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          git commit -m "feat: trigger build run for scenario suite"
+          git push origin "$BRANCH"
+          gh pr create --base main --head "$BRANCH" --title "feat: trigger build run for scenario suite" --body "Automated scenario run; drives orchestrate on merge."
+          gh pr merge "$BRANCH" --squash --delete-branch
+          git fetch origin main --quiet
+          MERGE_SHA="$(git rev-parse origin/main)"
+          echo "merge_sha=$MERGE_SHA" >> "$GITHUB_OUTPUT"
 
-      - name: Wait for orchestrate run to start
-        id: wait-start
+      - name: Wait for orchestrate run
+        id: wait
         env:
           GH_TOKEN: ${{ secrets.CASCADE_STATE_TEST_TOKEN }}
-          TRIGGER_SHA: ${{ steps.trigger.outputs.sha }}
+          MERGE_SHA: ${{ steps.seed.outputs.merge_sha }}
         run: |
-          MAX_ATTEMPTS=10
-          INTERVAL=30
-          for i in $(seq 1 $MAX_ATTEMPTS); do
-            echo "Attempt $i of $MAX_ATTEMPTS - checking for orchestrate run..."
-            RUN_ID=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/orchestrate.yaml/runs?head_sha=${TRIGGER_SHA}&per_page=1" --jq '.workflow_runs[0].id // empty')
-            if [ -n "$RUN_ID" ]; then
-              echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
-              echo "Orchestrate run started: $RUN_ID"
-              break
-            fi
-            if [ "$i" -eq "$MAX_ATTEMPTS" ]; then
-              echo "::error::Timed out waiting for orchestrate run to start after $((MAX_ATTEMPTS * INTERVAL))s"
-              exit 1
-            fi
-            sleep $INTERVAL
+          set -euo pipefail
+          RUN_ID=""
+          for i in $(seq 1 30); do
+            RUN_ID="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow=orchestrate.yaml --branch=main \
+              --json databaseId,headSha,status \
+              --jq ".[] | select(.headSha==\"$MERGE_SHA\") | .databaseId" | head -n1)"
+            [ -n "$RUN_ID" ] && break
+            sleep 10
           done
-
-      - name: Wait for orchestrate run to complete
-        id: wait-complete
-        env:
-          GH_TOKEN: ${{ secrets.CASCADE_STATE_TEST_TOKEN }}
-          RUN_ID: ${{ steps.wait-start.outputs.run_id }}
-        run: |
-          MAX_ATTEMPTS=20
-          INTERVAL=30
-          for i in $(seq 1 $MAX_ATTEMPTS); do
-            echo "Attempt $i of $MAX_ATTEMPTS - checking run $RUN_ID status..."
+          [ -n "$RUN_ID" ] || { echo "::error::no orchestrate run found for merge SHA $MERGE_SHA"; exit 1; }
+          echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
+          MAX_WAIT=$(( ${{ inputs.build_timeout_minutes || 10 }} * 60 ))
+          ELAPSED=0
+          INTERVAL=15
+          while [ $ELAPSED -lt $MAX_WAIT ]; do
             STATUS=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID" --jq '.status')
             CONCLUSION=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID" --jq '.conclusion // empty')
             echo "Status: $STATUS, Conclusion: $CONCLUSION"
@@ -106,18 +108,21 @@ jobs:
                 exit 1
               fi
             fi
-            if [ "$i" -eq "$MAX_ATTEMPTS" ]; then
-              echo "::error::Timed out waiting for orchestrate run to complete after $((MAX_ATTEMPTS * INTERVAL))s"
-              exit 1
-            fi
             sleep $INTERVAL
+            ELAPSED=$(( ELAPSED + INTERVAL ))
           done
+          if [ $ELAPSED -ge $MAX_WAIT ]; then
+            echo "::error::Timed out waiting for orchestrate run to complete"
+            exit 1
+          fi
 
       - name: Assert dispatch to primary
         env:
           GH_TOKEN: ${{ secrets.CASCADE_STATE_TEST_TOKEN }}
         run: |
           echo "Checking that External Update was dispatched to primary..."
+          # NOTE(A6): this reads workflow_runs[0] with no SHA/payload correlation and can pass on a stale run.
+          # Strengthening to correlate on dispatched ref/SHA is out of scope for this change.
           RECENT_RUNS=$(gh api "repos/stablekernel/cascade-example-primary/actions/workflows/external-update.yaml/runs?per_page=5" --jq '.workflow_runs[].created_at' 2>/dev/null || echo "")
           if [ -z "$RECENT_RUNS" ]; then
             echo "::error::No external-update runs found on primary after dispatch"
@@ -134,7 +139,6 @@ jobs:
             echo ""
             echo "| Check | Result |"
             echo "|-------|--------|"
-            echo "| Build triggered | ${{ steps.trigger.outcome }} |"
-            echo "| Orchestrate started | ${{ steps.wait-start.outcome }} |"
-            echo "| Orchestrate completed | ${{ steps.wait-complete.outcome }} |"
+            echo "| Build seeded via PR | ${{ steps.seed.outcome }} |"
+            echo "| Orchestrate completed | ${{ steps.wait.outcome }} |"
           } >> "$GITHUB_STEP_SUMMARY"
