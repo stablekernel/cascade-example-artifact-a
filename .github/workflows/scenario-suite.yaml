@@ -53,6 +53,15 @@ jobs:
           git config user.name "$BOT_NAME"
           git config user.email "$BOT_EMAIL"
 
+      - name: Clean slate - delete leftover releases and tags
+        env:
+          GH_TOKEN: ${{ secrets.CASCADE_STATE_TOKEN }}
+        run: |
+          gh release list --repo "$GITHUB_REPOSITORY" --limit 200 --json tagName --jq '.[].tagName' \
+            | while read -r t; do gh release delete "$t" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag 2>/dev/null || true; done
+          git fetch --tags --quiet || true
+          for t in $(git tag -l 'v*' 'rel-*'); do git push origin --delete "$t" 2>/dev/null || true; done
+
       - name: Seed build via PR
         id: seed
         env:
@@ -67,7 +76,7 @@ jobs:
           mkdir -p src
           echo "scenario change $(date -u +%FT%TWZ)" >> src/build-trigger.txt
           git add src/build-trigger.txt
-          git commit -m "feat: trigger build run for scenario suite"
+          git commit --no-gpg-sign -m "feat: trigger build run for scenario suite"
           git push origin "$BRANCH"
           gh pr create --base main --head "$BRANCH" --title "feat: trigger build run for scenario suite" --body "Automated scenario run; drives orchestrate on merge."
           gh pr merge "$BRANCH" --squash --delete-branch
