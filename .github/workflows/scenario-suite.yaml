@@ -83,6 +83,11 @@ jobs:
           git fetch origin main --quiet
           MERGE_SHA="$(git rev-parse origin/main)"
           echo "merge_sha=$MERGE_SHA" >> "$GITHUB_OUTPUT"
+          # Stamp a UTC boundary before orchestrate can fan out to primary, so the
+          # primary external-update wait correlates the run this merge triggered and
+          # never an older external-update run that happens to be newest.
+          DISPATCH_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          echo "dispatch_ts=$DISPATCH_TS" >> "$GITHUB_OUTPUT"
 
       - name: Wait for orchestrate run
         id: wait
@@ -126,19 +131,52 @@ jobs:
           fi
 
       - name: Assert dispatch to primary
+        id: assert_dispatch
         env:
           GH_TOKEN: ${{ secrets.CASCADE_STATE_TOKEN }}
+          PRIMARY_REPO: stablekernel/cascade-example-primary
+          DISPATCH_TS: ${{ steps.seed.outputs.dispatch_ts }}
         run: |
-          echo "Checking that External Update was dispatched to primary..."
-          # NOTE(A6): this reads workflow_runs[0] with no SHA/payload correlation and can pass on a stale run.
-          # Strengthening to correlate on dispatched ref/SHA is out of scope for this change.
-          RECENT_RUNS=$(gh api "repos/stablekernel/cascade-example-primary/actions/workflows/external-update.yaml/runs?per_page=5" --jq '.workflow_runs[].created_at' 2>/dev/null || echo "")
-          if [ -z "$RECENT_RUNS" ]; then
-            echo "::error::No external-update runs found on primary after dispatch"
+          set -euo pipefail
+          echo "Waiting for external-update run on primary dispatched at or after $DISPATCH_TS..."
+          # Correlate on the dispatch boundary so an older external-update run can never
+          # satisfy this assertion. Poll until our run appears, then block on its
+          # conclusion.
+          RUN_ID=""
+          for i in $(seq 1 30); do
+            RUN_ID="$(gh run list --repo "$PRIMARY_REPO" --workflow=external-update.yaml \
+              --created=">=$DISPATCH_TS" --limit=1 \
+              --json databaseId --jq '.[0].databaseId // empty')"
+            [ -n "$RUN_ID" ] && break
+            echo "attempt $i: no external-update run dispatched since $DISPATCH_TS yet"
+            sleep 10
+          done
+          [ -n "$RUN_ID" ] || { echo "::error::no external-update run found on primary for dispatch $DISPATCH_TS"; exit 1; }
+          echo "Found external-update run on primary: $RUN_ID"
+          echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
+          MAX_WAIT=$(( ${{ inputs.dispatch_timeout_minutes || 5 }} * 60 ))
+          ELAPSED=0
+          INTERVAL=15
+          while [ "$ELAPSED" -lt "$MAX_WAIT" ]; do
+            STATUS=$(gh api "repos/$PRIMARY_REPO/actions/runs/$RUN_ID" --jq '.status')
+            CONCLUSION=$(gh api "repos/$PRIMARY_REPO/actions/runs/$RUN_ID" --jq '.conclusion // empty')
+            echo "Status: $STATUS, Conclusion: $CONCLUSION"
+            if [ "$STATUS" = "completed" ]; then
+              if [ "$CONCLUSION" = "success" ]; then
+                echo "External Update run on primary completed successfully"
+                break
+              else
+                echo "::error::External Update run on primary completed with conclusion: $CONCLUSION"
+                exit 1
+              fi
+            fi
+            sleep "$INTERVAL"
+            ELAPSED=$(( ELAPSED + INTERVAL ))
+          done
+          if [ "$ELAPSED" -ge "$MAX_WAIT" ]; then
+            echo "::error::Timed out waiting for external-update run on primary to complete"
             exit 1
           fi
-          echo "External Update dispatched successfully. Recent runs:"
-          echo "$RECENT_RUNS"
 
       - name: Write summary
         if: always()
@@ -150,4 +188,5 @@ jobs:
             echo "|-------|--------|"
             echo "| Build seeded via PR | ${{ steps.seed.outcome }} |"
             echo "| Orchestrate completed | ${{ steps.wait.outcome }} |"
+            echo "| External Update on primary succeeded | ${{ steps.assert_dispatch.outcome }} |"
           } >> "$GITHUB_STEP_SUMMARY"
