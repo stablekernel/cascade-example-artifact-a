@@ -180,10 +180,14 @@ jobs:
           }
           ensure_primary_env
 
-          # Boundary so we resolve the run THIS dispatch created, then block on its
-          # conclusion (the anti-pattern sweep made primary require success).
-          DISPATCH_SINCE="$(date -u -d '60 seconds ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
-            || date -u -v-60S +%Y-%m-%dT%H:%M:%SZ)"
+          # Boundary used only to avoid resolving runs from earlier in this job.
+          # Sibling artifact suites dispatch into the same primary concurrently,
+          # so "newest run since boundary" can resolve a FOREIGN run (a different
+          # deploy_name). We therefore never gate on a sibling run's conclusion;
+          # the unique sentinel landing verbatim in our own slot is the only
+          # authoritative signal (external/command.go:187 writes --sha verbatim).
+          DISPATCH_SINCE="$(date -u -d '120 seconds ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+            || date -u -v-120S +%Y-%m-%dT%H:%M:%SZ)"
           gh workflow run external-update.yaml --repo "$PRIMARY_REPO" --ref main \
             -f source_repo="$GITHUB_REPOSITORY" \
             -f deploy_name="$PRIMARY_DEPLOY_NAME" \
@@ -192,34 +196,27 @@ jobs:
             -f version=v1.0.0 \
             -f artifacts='{"artifact_id":"artifact-a-'"$SENTINEL"'"}'
 
+          # Best-effort: surface this dispatch's own run for log triage. Match the
+          # run whose displayTitle carries OUR sentinel so concurrent sibling runs
+          # are never mistaken for ours. A failure here is informational only and
+          # must NOT abort the assertion; the slot poll below is the hard gate.
           RUN_ID=""
-          for i in $(seq 1 30); do
+          for i in $(seq 1 18); do
             RUN_ID="$(gh run list --repo "$PRIMARY_REPO" --workflow=external-update.yaml \
-              --branch=main --created=">=$DISPATCH_SINCE" --limit=1 \
-              --json databaseId --jq '.[0].databaseId // empty')"
+              --branch=main --created=">=$DISPATCH_SINCE" --limit=20 \
+              --json databaseId,displayTitle \
+              --jq 'map(select(.displayTitle | contains("'"$SENTINEL"'"))) | .[0].databaseId // empty')"
             [ -n "$RUN_ID" ] && break
-            echo "attempt $i: external-update run for this dispatch not visible yet"
+            echo "attempt ${i}: our external-update run (sentinel $SENTINEL) not yet visible"
             sleep 10
           done
-          [ -n "$RUN_ID" ] || { echo "::error::no external-update run found on primary for this dispatch"; exit 1; }
-          echo "Found external-update run on primary: $RUN_ID"
-
-          MAX_WAIT=$(( ${{ inputs.dispatch_timeout_minutes || 5 }} * 60 ))
-          ELAPSED=0
-          INTERVAL=15
-          while [ "$ELAPSED" -lt "$MAX_WAIT" ]; do
-            STATUS=$(gh api "repos/$PRIMARY_REPO/actions/runs/$RUN_ID" --jq '.status')
-            CONCLUSION=$(gh api "repos/$PRIMARY_REPO/actions/runs/$RUN_ID" --jq '.conclusion // empty')
-            echo "Status: $STATUS, Conclusion: $CONCLUSION"
-            if [ "$STATUS" = "completed" ]; then
-              [ "$CONCLUSION" = "success" ] && break
-              echo "::error::external-update run on primary concluded $CONCLUSION (sentinel slot not written)"
-              exit 1
-            fi
-            sleep "$INTERVAL"
-            ELAPSED=$(( ELAPSED + INTERVAL ))
-          done
-          [ "$ELAPSED" -lt "$MAX_WAIT" ] || { echo "::error::timed out waiting for external-update run on primary"; exit 1; }
+          if [ -n "$RUN_ID" ]; then
+            echo "Our primary external-update run: ${RUN_ID} (watch is informational)"
+            gh run watch "$RUN_ID" --repo "$PRIMARY_REPO" || \
+              echo "note: watch on ${RUN_ID} returned non-zero; deferring to slot poll"
+          else
+            echo "note: could not correlate our run by sentinel; deferring to slot poll"
+          fi
 
           # Read back the EXACT slot and assert the sentinel landed verbatim and
           # that .repo records THIS source repo. Poll primary main until the
