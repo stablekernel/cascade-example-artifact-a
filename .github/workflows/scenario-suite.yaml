@@ -35,7 +35,24 @@ jobs:
     name: Scenario Suite
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    outputs:
+      # Captured before anything is dispatched or merged. The reconcile job
+      # enumerates every run this repo produced at or after this instant and
+      # fails if any is unaccounted for in the ledger. Recorded first so no run
+      # the suite causes can fall outside the window.
+      window-start: ${{ steps.window.outputs.window-start }}
     steps:
+      # The reconcile window opens here, before the seed merge that fires the
+      # orchestrate run. Every run the suite goes on to cause in this repo lands
+      # at or after this timestamp, so the reconcile job sees all of them.
+      - name: Open reconcile window
+        id: window
+        run: |
+          set -euo pipefail
+          WINDOW_START="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          echo "window-start=$WINDOW_START" >> "$GITHUB_OUTPUT"
+          echo "reconcile window opened at $WINDOW_START"
+
       - name: Checkout
         uses: actions/checkout@v4
         with:
@@ -129,6 +146,20 @@ jobs:
             echo "::error::Timed out waiting for orchestrate run to complete"
             exit 1
           fi
+
+      # The merge above fires exactly one own-repo run: the push-triggered
+      # Orchestrate run on src/** (resolved as steps.wait.outputs.run_id). The
+      # wait step already gates it to success; register it so the reconcile job
+      # accounts for it. This is the only own-repo run the suite causes besides
+      # itself - external-update.yaml runs land in the primary repo, which the
+      # reconcile gate (scoped to this repo) does not enumerate.
+      - name: Register orchestrate run
+        uses: stablekernel/cascade/.github/actions/register-run@main
+        with:
+          run-id: ${{ steps.wait.outputs.run_id }}
+          expected-conclusion: success
+          reason: orchestrate-merge
+          upload: 'true'
 
       - name: Assert sentinel external-update lands verbatim in primary state
         id: assert_dispatch
@@ -300,3 +331,25 @@ jobs:
             echo "| Orchestrate completed | ${{ steps.wait.outcome }} |"
             echo "| Sentinel landed verbatim in primary state | ${{ steps.assert_dispatch.outcome }} |"
           } >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------
+  # Reconcile gate: structural coverage backstop. The suite's own asserts above
+  # still gate each run they wait on; this job is additive. It enumerates EVERY
+  # run this repo produced since window-start (captured before the seed merge)
+  # and fails if any is unaccounted for in the ledger the register-run step
+  # uploaded - an unregistered non-success run, or a registered run that
+  # concluded other than its expected conclusion. That turns any fire-and-forget
+  # run the suite forgets to gate into a hard red.
+  reconcile:
+    name: Reconcile scenario-window runs
+    needs: [scenario-suite]
+    if: always()
+    uses: stablekernel/cascade/.github/workflows/fleet-reconcile.yaml@main
+    permissions:
+      contents: read
+      actions: read
+    with:
+      window-start: ${{ needs.scenario-suite.outputs.window-start }}
+      # Artifact mode: the register-run step uploaded the ledger under the
+      # default cascade-run-ledger-* name; reconcile globs and merges it.
+      cascade-ref: main
