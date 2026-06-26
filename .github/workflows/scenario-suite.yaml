@@ -315,7 +315,7 @@ jobs:
           # are never mistaken for ours. A failure here is informational only and
           # must NOT abort the assertion; the slot poll below is the hard gate.
           RUN_ID=""
-          for _i in $(seq 1 3); do
+          for i in $(seq 1 3); do
             RUN_ID="$(gh run list --repo "$PRIMARY_REPO" --workflow=external-update.yaml \
               --branch=main --created=">=$DISPATCH_SINCE" --limit=20 \
               --json databaseId,displayTitle \
@@ -337,7 +337,7 @@ jobs:
           # finalize commit replicates.
           GOT_SHA=""
           GOT_REPO=""
-          for _i in $(seq 1 3); do
+          for i in $(seq 1 3); do
             resp="$(gh api "repos/$PRIMARY_REPO/contents/.github/manifest.yaml?ref=main")"
             echo "$resp" | jq -r '.content' | base64 -d > /tmp/primary-manifest.yaml
             GOT_SHA="$(yq eval '.ci.state.'"$PRIMARY_ENV"'.external.'"$PRIMARY_DEPLOY_NAME"'.sha // ""' /tmp/primary-manifest.yaml)"
@@ -367,7 +367,7 @@ jobs:
           # already landed verbatim above, so the run provably exists; failing to
           # resolve it is a hard error.
           RECEIVER_RUN_ID=""
-          for _i in $(seq 1 5); do
+          for i in $(seq 1 5); do
             RECEIVER_RUN_ID="$(gh run list --repo "$PRIMARY_REPO" --workflow=external-update.yaml \
               --branch=main --created=">=$DISPATCH_SINCE" --limit=20 \
               --json databaseId,displayTitle \
