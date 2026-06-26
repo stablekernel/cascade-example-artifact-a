@@ -42,6 +42,42 @@ jobs:
       # the suite causes can fall outside the window.
       window-start: ${{ steps.window.outputs.window-start }}
     steps:
+      - name: Install gh transient-retry wrapper
+        run: |
+          cat > "$RUNNER_TEMP/gh-retry.sh" <<'GHRETRY'
+          _gh_is_transient() {
+            local out="$1"
+            if printf '%s' "$out" | grep -qiE 'HTTP 5[0-9][0-9]|HTTP 429|HTTP 401|Bad credentials|was submitted too quickly|secondary rate limit'; then
+              return 0
+            fi
+            if printf '%s' "$out" | grep -qiE 'HTTP 403'; then
+              if printf '%s' "$out" | grep -qiE 'rate limit|secondary|abuse|too quickly'; then
+                return 0
+              fi
+            fi
+            return 1
+          }
+          gh() {
+            local attempt=1 max="${GH_RETRY_MAX:-5}" delay="${GH_RETRY_BASE_DELAY:-3}" out rc
+            while :; do
+              out="$(command gh "$@" 2>&1)" && rc=0 || rc=$?
+              if [ "$rc" -eq 0 ]; then
+                printf '%s\n' "$out"
+                return 0
+              fi
+              if [ "$attempt" -ge "$max" ] || ! _gh_is_transient "$out"; then
+                printf '%s\n' "$out" >&2
+                return "$rc"
+              fi
+              printf 'gh: transient error on attempt %d/%d, retrying in %ds\n%s\n' "$attempt" "$max" "$delay" "$out" >&2
+              sleep "$delay"
+              attempt=$((attempt + 1))
+              delay=$((delay * 2))
+            done
+          }
+          GHRETRY
+          echo "BASH_ENV=$RUNNER_TEMP/gh-retry.sh" >> "$GITHUB_ENV"
+
       # The reconcile window opens here, before the seed merge that fires the
       # orchestrate run. Every run the suite goes on to cause in this repo lands
       # at or after this timestamp, so the reconcile job sees all of them.
@@ -114,7 +150,7 @@ jobs:
         run: |
           set -euo pipefail
           RUN_ID=""
-          for i in $(seq 1 6); do
+          for _i in $(seq 1 6); do
             RUN_ID="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow=orchestrate.yaml --branch=main \
               --json databaseId,headSha,status \
               --jq ".[] | select(.headSha==\"$MERGE_SHA\") | .databaseId" | head -n1)"
@@ -279,7 +315,7 @@ jobs:
           # are never mistaken for ours. A failure here is informational only and
           # must NOT abort the assertion; the slot poll below is the hard gate.
           RUN_ID=""
-          for i in $(seq 1 3); do
+          for _i in $(seq 1 3); do
             RUN_ID="$(gh run list --repo "$PRIMARY_REPO" --workflow=external-update.yaml \
               --branch=main --created=">=$DISPATCH_SINCE" --limit=20 \
               --json databaseId,displayTitle \
@@ -301,7 +337,7 @@ jobs:
           # finalize commit replicates.
           GOT_SHA=""
           GOT_REPO=""
-          for i in $(seq 1 3); do
+          for _i in $(seq 1 3); do
             resp="$(gh api "repos/$PRIMARY_REPO/contents/.github/manifest.yaml?ref=main")"
             echo "$resp" | jq -r '.content' | base64 -d > /tmp/primary-manifest.yaml
             GOT_SHA="$(yq eval '.ci.state.'"$PRIMARY_ENV"'.external.'"$PRIMARY_DEPLOY_NAME"'.sha // ""' /tmp/primary-manifest.yaml)"
@@ -331,7 +367,7 @@ jobs:
           # already landed verbatim above, so the run provably exists; failing to
           # resolve it is a hard error.
           RECEIVER_RUN_ID=""
-          for i in $(seq 1 5); do
+          for _i in $(seq 1 5); do
             RECEIVER_RUN_ID="$(gh run list --repo "$PRIMARY_REPO" --workflow=external-update.yaml \
               --branch=main --created=">=$DISPATCH_SINCE" --limit=20 \
               --json databaseId,displayTitle \
