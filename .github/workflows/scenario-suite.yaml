@@ -28,7 +28,7 @@ env:
   MANIFEST_KEY: ci
   TAG_PREFIX: v
   BOT_NAME: github-actions[bot]
-  BOT_EMAIL: github-actions[bot]@users.noreply.github.com
+  BOT_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
 
 jobs:
   scenario-suite:
@@ -85,8 +85,8 @@ jobs:
           GH_TOKEN: ${{ secrets.CASCADE_STATE_TOKEN }}
         run: |
           set -euo pipefail
-          git config user.name "scenario-suite"
-          git config user.email "scenario-suite@users.noreply.github.com"
+          git config user.name "$BOT_NAME"
+          git config user.email "$BOT_EMAIL"
           BRANCH="scenario/src-$(date +%s)-$RANDOM"
           git fetch origin main --quiet
           git checkout -B "$BRANCH" origin/main
@@ -96,7 +96,7 @@ jobs:
           git commit --no-gpg-sign -m "feat: trigger build run for scenario suite"
           git push origin "$BRANCH"
           gh pr create --base main --head "$BRANCH" --title "feat: trigger build run for scenario suite" --body "Automated scenario run; drives orchestrate on merge."
-          gh pr merge "$BRANCH" --squash --delete-branch
+          gh pr merge "$BRANCH" --rebase --delete-branch
           git fetch origin main --quiet
           MERGE_SHA="$(git rev-parse origin/main)"
           echo "merge_sha=$MERGE_SHA" >> "$GITHUB_OUTPUT"
