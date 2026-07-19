@@ -22,6 +22,6 @@ ci:
   state:
     prerelease:
       sha: 72f1b05a4534133f4c633c2fd0898c3a5ac5e651
-      version: v0.1.0-rc.1
+      version: v0.16.5-rc.1
       committed_at: "2026-07-19T07:18:01Z"
       committed_by: stablekerneltokenbot[bot]
