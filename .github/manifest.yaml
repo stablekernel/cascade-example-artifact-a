@@ -21,7 +21,7 @@ ci:
       environment: staging
   state:
     prerelease:
-      sha: 8c6087a7d5665dd6ff1cb63b382b0361c212e36d
-      version: v0.16.5-rc.1
-      committed_at: "2026-07-19T07:55:31Z"
-      committed_by: stablekerneltokenbot[bot]
+      sha: ec53ece7efb6d7582b74c162ff7a78f43d30504b
+      version: v0.1.0-rc.0
+      committed_at: "2026-07-19T14:11:13Z"
+      committed_by: joshua-temple
