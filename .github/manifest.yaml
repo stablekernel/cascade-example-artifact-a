@@ -21,7 +21,7 @@ ci:
       environment: staging
   state:
     prerelease:
-      sha: fffffc0a81fdbbd173735f34e5ecd7013ab5622b
-      version: v1.1.2-rc.0
-      committed_at: "2026-07-24T07:21:11Z"
+      sha: 5382d78f3b8ec3ec871642a28773430a3357c70c
+      version: v0.1.0-rc.0
+      committed_at: "2026-07-24T13:25:54Z"
       committed_by: joshua-temple
